@@ -15,11 +15,11 @@ data1 = readdlm("instance/euclidA100.tsp")
 data2 = readdlm("instance/euclidB100.tsp")
 
 # Extraire les coordonnées des 5 premières villes pour chaque objectif
-cities1 = data1[7:11, 2:3]
-cities2 = data2[7:11, 2:3]
+cities1 = data1[7:12, 2:3]
+cities2 = data2[7:12, 2:3]
 
 # Créer une matrice de distance pour chaque objectif
-n = 5
+n = 6
 dist_matrix1 = zeros(Int, n, n)
 dist_matrix2 = zeros(Int, n, n)
 for i in 1:n
@@ -28,6 +28,7 @@ for i in 1:n
         dist_matrix2[i, j] = round(sqrt((cities2[i, 1] - cities2[j, 1])^2 + (cities2[i, 2] - cities2[j, 2])^2))
     end
 end
+
 
 # Créer un modèle pour l'algorithme de Branch-and-Bound multi-objectif
 model = Model(() -> MOA.Optimizer(CPLEX.Optimizer))
