@@ -150,10 +150,6 @@ end
 
 
 
-##
-
-
-
 function MOBB(
     directed_graph::SimpleDiGraph,
     algorithm::MultiObjectiveBranchBound,
@@ -168,6 +164,43 @@ function MOBB(
     # Vérifier que le nœud est activé
     @assert node.activated == true "Le nœud actuel n'est pas activé"
     node.activated = false
+    cuts_added = false
+
+    while true
+        # Calculer l'ensemble des bornes inférieures locales
+        if computeLBS(node, model, algorithm, Bounds)
+            prune!(node, INFEASIBILITY)
+            algorithm.pruned_nodes += 1
+            return
+        end
+
+        #remplir l'ubs avec l'heuristique
+        UBS = fillUBS(UBS,node.lower_bound_set,model)
+
+        println("Node $(node.num): Current solutions in UBS")
+        for (i, sol) in enumerate(UBS)
+            println("Objectives: $(sol.y)")
+        end
+
+
+        #coupe de manger
+        cuts_added = mangercut(directed_graph, node.lower_bound_set, model, capacities, NC)
+        println(cuts_added)
+
+        # Si des coupes ont été ajoutées, recommencer la boucle
+        if cuts_added
+            continue
+        else
+            break
+        end
+    end
+
+
+    # Mettre à jour l'ensemble des bornes supérieures avec le lbs
+    if updateUBS(node, UBS)
+        algorithm.pruned_nodes += 1
+        return
+    end
 
     # Print des solutions dans UBS
     println("Node $(node.num): Current solutions in UBS")
@@ -175,23 +208,9 @@ function MOBB(
         println("Objectives: $(sol.y)")
     end
 
-
-    # Calculer l'ensemble des bornes inférieures locales
-    if computeLBS(directed_graph, node, model, algorithm, Bounds, NC, capacities)
-        prune!(node, INFEASIBILITY)
-        algorithm.pruned_nodes += 1
-        return
-    end
-
-    # Mettre à jour l'ensemble des bornes supérieures
-    if updateUBS(node, UBS, directed_graph, capacities, NC)
-        algorithm.pruned_nodes += 1
-        return
-    end
-
     # Test de dominance complet
     if fullyExplicitDominanceTest(node, UBS, model)
-        prune!(node, DOMINANCE)
+        prune!(node, DOMINANCE) 
         algorithm.pruned_nodes += 1
         return
     end
@@ -218,6 +237,8 @@ end
 
 
 
+
+
 # -------------------------------------
 # ----------- main program ------------
 # -------------------------------------
@@ -227,12 +248,12 @@ function optimize_multiobjective!(
     model::Optimizer,
     # verbose :: Bool = false,
 )   
-    NC = 2
+    NC = 1
     global total_cut
     model.total_nodes = 0
     algorithm.pruned_nodes = 0
-    start_time = time()
-    n_sommet = round(Int64,sqrt(MOI.get(model, MOI.NumberOfVariables())))
+    start_time = time() 
+    n_sommet = Int(sqrt(length(MOI.get(model, MOI.ListOfVariableIndices()))))
     directed_graph = SimpleDiGraph(n_sommet) #initialiser le graphe
     capacities = zeros(Float64, n_sommet, n_sommet) #les capacités
 
@@ -271,13 +292,8 @@ function optimize_multiobjective!(
 
     # Compléter le LBS
     for sol in initial_supported_solutions
-        #push!(root.lower_bound_set, sol)
-    # Exécuter l'algorithme de min-cut pour chaque solution initiale
-        #flows, parts = run_mincut(directed_graph, sol, NC, capacities)
-    # Ajouter des coupes si flows n'est pas vide
-        #if !isempty(flows)
-            #add_cuts(model, sol, parts, length(flows))
-        #end
+        println("premier LBS aprés dichotomie ",sol.y)
+        push!(root.lower_bound_set, sol)
     end
 
     status = MOI.OPTIMAL

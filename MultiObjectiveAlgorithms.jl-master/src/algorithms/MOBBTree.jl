@@ -3,7 +3,6 @@ using LightGraphs
 using LightGraphsFlows
 using SparseArrays
 #for min cut
-using PyPlot
 using Statistics: mean
 
 
@@ -385,41 +384,43 @@ end
 
 ## fonction min cut : 
 
-function run_mincut(directed_graph::SimpleDiGraph, sol::SupportedSolutionPoint, NC::Int, capacities::Array{Float64, 2})
+function run_mincut(directed_graph::SimpleDiGraph, sol::SupportedSolutionPoint, NC::Int, capacities::Array{Float64, 2}, n::Int64)
     flows = []
     parts = []
-    n = Int(sqrt(length(sol.x[1])))  # Nombre de lignes/colonnes dans la matrice
 
-    adj_matrix = reshape(sol.x[1], n, n)  # La matrice d'adjacence est maintenant directement sol.x[1]
-
+    adj_matrix = transpose(reshape(sol.x[1], n, n))# La matrice d'adjacence est maintenant directement sol.x[1]
+    # Rendre la matrice symétrique
     for i in 1:n
-        for j in i:n  # Commencer à partir de i pour parcourir seulement la partie diagonale supérieure
+        for j in (i+1):n
+            adj_matrix[i, j] = adj_matrix[j, i] = adj_matrix[i, j]+ adj_matrix[j, i]
+        end
+    end
+
+    # Mettre à jour les arêtes du SimpleDiGraph à partir de la matrice d'adjacence
+    for i in 1:n
+        for j in 1:n  # Parcourir toutes les paires de sommets
             if adj_matrix[i, j] != 0
                 if !has_edge(directed_graph, i, j)
                     # Ajouter l'arête dans le sens i -> j
                     add_edge!(directed_graph, i, j)
-                    add_edge!(directed_graph, j, i)
                 end
             elseif has_edge(directed_graph, i, j)
                 # Si l'arête existe mais que sa valeur dans la solution courante est 0, supprimez-la
                 rem_edge!(directed_graph, i, j)
-                rem_edge!(directed_graph, j, i)
             end
             capacities[i, j] = adj_matrix[i, j]
-            capacities[j, i] = adj_matrix[i, j] 
         end
     end
     
 
-    # Vérifier si le graphe est connecté
     if !is_connected(directed_graph)
         # Le graphe n'est pas connecté
         components = connected_components(directed_graph)
         for i in 1:length(components)
             # Prendre un ensemble de sommets non connectés
             part1 = components[i]
-            # Prendre tous les autres sommets qui ne font pas partie du premier ensemble comme le deuxième ensemble
-            part2 = setdiff(1:n, part1)
+            # Tous les autres sommets forment la deuxième partie
+            part2 = setdiff(vertices(directed_graph), part1)
             # Vérifiez si le couple (part1, part2) est déjà dans parts
             if !any((p1 == part1 && p2 == part2) || (p1 == part2 && p2 == part1) for (p1, p2) in parts)
                 push!(flows, 0)
@@ -437,8 +438,8 @@ function run_mincut(directed_graph::SimpleDiGraph, sol::SupportedSolutionPoint, 
         for source in 1:n
             for target in 1:n
                 if source != target
-                    p1, p2, f = mincut(directed_graph, sol, source, target, capacities)
-                    if f < 2
+                    p1, p2, f = mincut(directed_graph, sol, source, target, capacities,n)
+                    if f < 2 - 1e-3
                         # Vérifie si le couple (p1, p2) est déjà dans parts
                         if !any([sort(p1) == sort(x) && sort(p2) == sort(y) for (x, y) in parts])
                             push!(flows, f)
@@ -458,9 +459,8 @@ end
 
 
 
-function mincut(directed_graph::SimpleDiGraph, sol::SupportedSolutionPoint, source::Int, target::Int, capacities::Array{Float64, 2})
-    # Obtenir la matrice d'adjacence à partir de sol.x[1]
-    n = Int(sqrt(length(sol.x[1])))  # Nombre de lignes/colonnes dans la matrice
+function mincut(directed_graph::SimpleDiGraph, sol::SupportedSolutionPoint, source::Int, target::Int, capacities::Array{Float64, 2}, n::Int64)
+
 
     # Appeler maximum_flow avec les nouvelles capacités
     flow, flow_matrix = maximum_flow(directed_graph, source, target, capacities, EdmondsKarpAlgorithm())
@@ -492,9 +492,8 @@ end
 
 
 
-function add_cuts(model, sol, parts, NC)
-    # Supposons que votre matrice d'adjacence est une matrice carrée
-    n = Int(sqrt(length(sol.x[1])))
+function add_cuts(model, parts, NC, n)
+
     global total_cut
     for i in 1:NC
         part1, part2 = parts[i]
@@ -518,16 +517,58 @@ function add_cuts(model, sol, parts, NC)
 end
 
 
+# fonction pour remplir l'ubs avec l'heuristique :
 
 
+function fillUBS(UBS::Vector{SupportedSolutionPoint}, lower_bound_set::Vector{SupportedSolutionPoint}, model::Optimizer)
+    # Transformer chaque solution dans lower_bound_set en un chemin valide de TSP
+    transformed_solutions = [primalHeuristicTSP(s,model) for s in lower_bound_set]
+
+    # Pour chaque solution transformée, l'ajouter à UBS en utilisant push_filtering_dominance
+    for s in transformed_solutions
+        push_filtering_dominance(UBS, s)
+
+    end
+
+    return UBS
+end
 
 
+#fonction pour ajouter les coupes au model aprés le cacul des ubs
 
+function mangercut(directed_graph::SimpleDiGraph, lower_bound_set::Vector{SupportedSolutionPoint}, model::Optimizer, capacities::Array{Float64, 2}, NC::Int64)
+    # Parcourir toutes les solutions du lbs
+    n = Int(sqrt(length(MOI.get(model, MOI.ListOfVariableIndices()))))  # Nombre de sommets
+    cuts_added = false
 
+    i = 1
+    while i <= length(lower_bound_set)
+        sol = lower_bound_set[i]
 
+        # Imprimer la solution actuelle du LBS
+        println("Solution actuelle du LBS : ", sol.y)
 
+        # Exécuter l'algorithme de min-cut
+        if NC != 0
+            flows, parts = run_mincut(directed_graph, sol, NC, capacities, n)
+            # Ajouter des coupes si flows n'est pas vide
+            if !isempty(flows)
+                println(flows)   
+                println("partieee ", parts)         
+                add_cuts(model, parts, length(flows),n)
+                cuts_added = true
 
+                # Supprimer la solution du LBS
+                println("DELEATTTTTTTTTTTTTTTTTTTTTTTTTT")
+                deleteat!(lower_bound_set, i)
+            else
+                i += 1
+            end
+        end
+    end
 
+    return(cuts_added)
+end
 
 
 
@@ -539,18 +580,16 @@ Stop looking for lower bounds if duplicate is encounterd
 """
 
 
-function MOLP(directed_graph::SimpleDiGraph, algorithm, model::Optimizer, node::Node, NC::Int64, capacities::Array{Float64, 2})
+function MOLP(algorithm, model::Optimizer, node::Node)
     Λ = _fix_λ(algorithm, model)
 
     constraints = Vector{MOI.ConstraintIndex}()
 
+
     for λ in Λ
         status, solution = _solve_weighted_sum(model, Dichotomy(), λ)
-
         if _is_scalar_status_optimal(status)
-            # Convertir solution.x en une matrice d'adjacence
-            n = round(Int64, sqrt(length(solution.x)))  # Nombre de sommets
-            
+
             # Extraire et trier les paires clé-valeur en fonction des indices des variables
             sorted_pairs = sort(collect(solution.x), by = x -> x[1].value)
             
@@ -559,14 +598,6 @@ function MOLP(directed_graph::SimpleDiGraph, algorithm, model::Optimizer, node::
             
             sol = SupportedSolutionPoint([x_vector], solution.y, λ, _is_integer(algorithm, x_vector))
             
-            # Exécuter l'algorithme de min-cut
-            if NC != 0
-                flows, parts = run_mincut(directed_graph, sol, NC, capacities)
-                # Ajouter des coupes si flows n'est pas vide
-                if !isempty(flows)
-                    add_cuts(model, sol, parts, length(flows))
-                end
-            end
 
             if any(test -> test.y ≈ sol.y, node.lower_bound_set)
                 nothing
@@ -577,119 +608,172 @@ function MOLP(directed_graph::SimpleDiGraph, algorithm, model::Optimizer, node::
         end
     end
 
-    if NC!= 0
-        node.lower_bound_set = filter_solutions(node.lower_bound_set,model)
-    end
 
-    # Visualiser les solutions et les coupes après avoir traité tous les lambdas
-    #draw_solution(node.lower_bound_set)
+
 end
 
+##test de solutions.
 
+function is_valid_tsp_path(sol::SupportedSolutionPoint)
+    n = round(Int64, sqrt(length(sol.x[1])))  # Nombre de sommets
+    path_matrix = transpose(reshape(sol.x[1], n, n))  # Matrice d'adjacence
 
+    visited = zeros(Bool, n)  # Tableau pour suivre les sommets visités
 
-
-function filter_solutions(lower_bound_set::Vector{SupportedSolutionPoint}, model::Optimizer)
-    # Récupérez les contraintes du modèle
-    constraints = MOI.get(model, MOI.ListOfConstraintIndices{MOI.ScalarAffineFunction{Float64}, MOI.GreaterThan{Float64}}())
-    # Créez un nouveau LBS qui contiendra uniquement les solutions valides
-    valid_lower_bound_set = SupportedSolutionPoint[]
-
-    # Parcourez chaque solution dans le LBS
-    for sol in lower_bound_set
-        is_valid = true
-
-        # Vérifiez chaque contrainte
-        for constraint in constraints
-            func = MOI.get(model, MOI.ConstraintFunction(), constraint)
-            set = MOI.get(model, MOI.ConstraintSet(), constraint)
-            # Calculez la valeur de la fonction contrainte pour la solution actuelle
-            value = sum(term.coefficient * sol.x[1][term.variable.value] for term in func.terms)
-
-            # Si la valeur ne respecte pas la contrainte, marquez la solution comme invalide et arrêtez de vérifier les autres contraintes
-            if value < set.lower
-                is_valid = false
-                break
+    # Fonction DFS pour parcourir le graphe
+    function dfs(node)
+        visited[node] = true
+        for i in 1:n
+            if path_matrix[node, i] != 0 && !visited[i]
+                dfs(i)
             end
         end
-
-        # Si la solution est valide, ajoutez-la au nouveau LBS
-        if is_valid
-            push!(valid_lower_bound_set, sol)
-        end
     end
 
-    # Retournez le nouveau LBS qui contient uniquement les solutions valides
-    return valid_lower_bound_set
-end
+    # Appel de la fonction DFS à partir du premier sommet
+    dfs(1)
 
-
-
-
-function draw_solution(lower_bound_set::Vector{SupportedSolutionPoint})
-    # Supposons que chaque SupportedSolutionPoint a deux critères
-    criterion1_values = [sol.y[1] for sol in lower_bound_set]
-    criterion2_values = [sol.y[2] for sol in lower_bound_set]
-
-    # Créez un nouveau graphique
-    figure()
-    
-    # Ajoutez les solutions au graphique
-    scatter(criterion1_values, criterion2_values, label="Solutions")
-
-    # Ajoutez des légendes et des titres
-    title("Solutions dans l'espace des critères")
-    xlabel("Critère 1")
-    ylabel("Critère 2")
-    legend()
-
-    # Affichez le graphique
-    show()
-end
-
-
-
-function testmincut(directed_graph::SimpleDiGraph, sol::SupportedSolutionPoint, capacities::Array{Float64, 2})
-    n = Int(sqrt(length(sol.x[1])))  # Nombre de lignes/colonnes dans la matrice
-
-    adj_matrix = reshape(sol.x[1], n, n)  # La matrice d'adjacence est maintenant directement sol.x[1]
-
-    # Mettre à jour les arêtes du SimpleDiGraph à partir de la matrice d'adjacence
+    # Vérifier si tous les sommets ont été visités
     for i in 1:n
-        for j in i:n  # Commencer à partir de i pour parcourir seulement la partie diagonale supérieure
-            if adj_matrix[i, j] != 0
-                if !has_edge(directed_graph, i, j)
-                    # Ajouter l'arête dans le sens i -> j
-                    add_edge!(directed_graph, i, j)
-                    add_edge!(directed_graph, j, i)
-                end
-            elseif has_edge(directed_graph, i, j)
-                # Si l'arête existe mais que sa valeur dans la solution courante est 0, supprimez-la
-                rem_edge!(directed_graph, i, j)
-                rem_edge!(directed_graph, j, i)
-            end
-            capacities[i, j] = adj_matrix[i, j]
-            capacities[j, i] = adj_matrix[i, j] 
-        end
-    end
-    
-
-    # Vérifier si le mincut est supérieur à 2 pour chaque paire de sommets source et cible
-    for source in 1:n
-        for target in 1:n
-            if source != target
-                _, _, f = mincut(directed_graph, sol, source, target, capacities)
-                println(f)
-                if f < 2
-                    # Si le mincut est inférieur ou égal à 2 pour n'importe quelle paire de sommets source et cible, retourner false
-                    return false
-                end
-            end
+        if !visited[i]
+            return false
         end
     end
 
-    # Si le mincut est supérieur à 2 pour toutes les paires de sommets source et cible, retourner true
     return true
+end
+
+
+## heuristique primal
+function primalHeuristicTSP(sol::SupportedSolutionPoint, model::Optimizer)
+    # Get the x value from sol
+    n = round(Int64, sqrt(length(sol.x[1]))) # Nombre de lignes/colonnes dans la matrice
+
+    xfrac = transpose(reshape(sol.x[1], n, n))
+    λ = sol.λ
+    # Initialize the solution matrix
+    sol=zeros(Float64,n, n)
+        
+    L=[]
+    for i in 1:n
+        for j in i+1:n
+            push!(L,(i,j,xfrac[i,j]))
+        end
+    end
+    sort!(L,by = x -> x[3])  
+       
+    CC= zeros(Int64,n)  #Connected component of node i
+    for i in 1:n
+        CC[i]=-1
+    end
+
+    tour=zeros(Int64,n,2)  # the two neighbours of i in a TSP tour, the first is always filled before de second
+    for i in 1:n
+        tour[i,1]=-1
+        tour[i,2]=-1
+    end
+     
+    cpt=0
+    while ( (cpt!=n-1) && (size(L)!=0) )
+        (i,j,val)=pop!(L)   
+
+        if ( ( (CC[i]==-1) || (CC[j]==-1) || (CC[i]!=CC[j]) )  && (tour[i,2]==-1) && (tour[j,2]==-1) ) 
+            cpt=cpt+1 
+           
+            if (tour[i,1]==-1)  # if no edge going out from i in the sol
+                tour[i,1]=j        # the first outgoing edge is j
+                CC[i]=i
+            else
+                tour[i,2]=j        # otherwise the second outgoing edge is j
+            end
+
+            if (tour[j,1]==-1)
+                tour[j,1]=i
+                CC[j]=CC[i]
+            else
+                tour[j,2]=i
+        	
+                oldi=i
+                k=j
+                while (tour[k,2]!=-1)  # update to i the CC of all the nodes linked to j
+                    if (tour[k,2]==oldi) 
+                        l=tour[k,1]
+                    else 
+                        l=tour[k,2]
+                    end
+                    CC[l]=CC[i]
+                    oldi=k
+                    k=l
+                end
+            end
+        end
+    end
+     
+    i1=-1          # two nodes haven't their 2nd neighbour encoded at the end of the previous loop
+    i2=0
+    for i in 1:n
+        if tour[i,2]==-1
+            if i1==-1
+                i1=i
+            else 
+                i2=i
+            end
+        end
+    end
+    tour[i1,2]=i2
+    tour[i2,2]=i1
+    
+    for i in 1:n
+        for j in i+1:n     
+            if ((j!=tour[i,1])&&(j!=tour[i,2]))
+                sol[i,j]=0
+            else          
+                sol[i,j]=1      
+            end
+        end
+    end
+      
+    # Remodeler la matrice de solution en un vecteur
+    sol_vector = vec(reshape(sol, 1, n*n))
+
+    # Récupérer les fonctions objectif du modèle
+    objective_functions = model.f
+
+    # Initialiser les valeurs des objectifs à 0
+    objective_value1 = 0.0
+    objective_value2 = 0.0
+
+    # Parcourir chaque terme de la première fonction objectif
+    for i in 1:n*(n-1)
+        # Extraire l'indice de la variable et son coefficient
+        var_index = objective_functions.terms[i].scalar_term.variable.value
+        coefficient = objective_functions.terms[i].scalar_term.coefficient
+
+        # Ajouter le produit du coefficient et de la valeur de la variable à la valeur de l'objectif
+        objective_value1 += coefficient * sol_vector[var_index]
+    end
+
+    # Parcourir chaque terme de la deuxième fonction objectif
+    for i in n*(n-1)+1:2*n*(n-1)
+        # Extraire l'indice de la variable et son coefficient
+        var_index = objective_functions.terms[i].scalar_term.variable.value
+        coefficient = objective_functions.terms[i].scalar_term.coefficient
+
+        # Ajouter le produit du coefficient et de la valeur de la variable à la valeur de l'objectif
+        objective_value2 += coefficient * sol_vector[var_index]
+    end
+
+    # Imprimer le vecteur de solution et les valeurs des objectifs
+    # println("Vecteur de solution : ", sol_vector)
+    # println("Valeur de l'objectif 1 : ", objective_value1)
+    # println("Valeur de l'objectif 2 : ", objective_value2)
+
+    # Créez une nouvelle instance de SupportedSolutionPoint
+    new_sol = SupportedSolutionPoint([sol_vector], [objective_value1, objective_value2], λ, true)
+
+    return new_sol
+
+
 end
 
 
@@ -702,10 +786,10 @@ end
 Compute and stock the relaxed bound set (i.e. the LP relaxation) of the (sub)problem defined by the given node.
 Return `true` if the node is pruned by infeasibility.
 """
-function computeLBS(directed_graph::SimpleDiGraph, node::Node, model::Optimizer, algorithm, Bounds::Vector{Dict{MOI.VariableIndex, MOI.ConstraintIndex}}, NC::Int64, capacities::Array{Float64, 2})::Bool
+function computeLBS(node::Node, model::Optimizer, algorithm, Bounds::Vector{Dict{MOI.VariableIndex, MOI.ConstraintIndex}})::Bool
     setVarBounds(node, model, Bounds)
     
-    MOLP(directed_graph, algorithm, model, node, NC, capacities)
+    MOLP(algorithm, model, node)
 
     removeVarBounds(node, model, Bounds)
     return length(node.lower_bound_set) == 0
@@ -739,15 +823,19 @@ end
 At the given node, update (filtered by dominance) the global upper bound set.
 Return `true` if the node is pruned by integrity.
 """
-function updateUBS(node::Node, UBS::Vector{SupportedSolutionPoint}, directed_graph::SimpleDiGraph, capacities::Array{Float64, 2}, NC::Int64)::Bool
-    for i in 1:length(node.lower_bound_set) 
-        
+function updateUBS(node::Node, UBS::Vector{SupportedSolutionPoint})::Bool
+    for i in 1:length(node.lower_bound_set)        
         if node.lower_bound_set[i].is_integer 
-            s = node.lower_bound_set[i] ; push_filtering_dominance(UBS, s)
+            s = node.lower_bound_set[i]
+            # Ajouter une solution à l'UBS seulement si c'est un chemin valide pour le TSP
+            if is_valid_tsp_path(s)
+                push_filtering_dominance(UBS, s)
+            end
         end
     end
     return false
 end
+
 
 # ----------------------------------
 # ---------- fathoming -------------
